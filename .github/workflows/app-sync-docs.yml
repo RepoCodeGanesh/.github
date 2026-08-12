@@ -1,0 +1,52 @@
+# ==============================================================================
+# Reusable Called Workflow: RAG Documents Storage Sync
+# Syncs local RAG text documents to Azure Blob Storage container using RBAC
+# Fully Parameterized for Upcoming Applications & Customizations
+# ==============================================================================
+
+name: Reusable RAG Documents Sync
+
+on:
+  workflow_call:
+    inputs:
+      storage_account_name:
+        required: true
+        type: string
+      container_name:
+        required: true
+        type: string
+      source_directory:
+        required: true
+        type: string
+      app_subscription_id:
+        required: true
+        type: string
+    secrets:
+      APP_CLIENT_ID:
+        required: true
+      AZURE_TENANT_ID:
+        required: true
+
+jobs:
+  sync-docs:
+    name: Sync RAG Documents
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Azure Login (OIDC) — Apps-prod
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.APP_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ inputs.app_subscription_id }}
+
+      - name: Sync RAG Text Files to Blob Storage (Incremental & Auto-Clean)
+        run: |
+          echo "Syncing RAG documents via Entra ID RBAC..."
+          az storage blob sync \
+            --account-name "${{ inputs.storage_account_name }}" \
+            --container "${{ inputs.container_name }}" \
+            --source "${{ inputs.source_directory }}" \
+            --auth-mode login

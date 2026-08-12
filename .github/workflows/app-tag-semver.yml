@@ -1,0 +1,60 @@
+# ==============================================================================
+# Reusable Called Workflow: Enterprise SemVer Tagging & Release
+# Downloads backend build artifact, creates SemVer git tag, and GitHub Release
+# Fully Parameterized for Upcoming Applications & Customizations
+# ==============================================================================
+
+name: Reusable SemVer Release & Tagging
+
+on:
+  workflow_call:
+    inputs:
+      artifact_name:
+        type: string
+        default: 'taxbot-backend-package'
+      release_artifacts:
+        type: string
+        default: 'functionapp.zip'
+      default_bump:
+        type: string
+        default: 'patch'
+      tag_prefix:
+        type: string
+        default: 'v'
+
+jobs:
+  release:
+    name: Enterprise SemVer Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Download Backend Package Artifact for Release
+        uses: actions/download-artifact@v5
+        with:
+          name: ${{ inputs.artifact_name }}
+          path: .
+        continue-on-error: true
+
+      - name: Auto-Create Enterprise Git Release Tag (SemVer)
+        id: tag_version
+        if: github.event_name == 'workflow_dispatch' || ((github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/') || startsWith(github.ref, 'refs/heads/hotfix/')) && github.event_name == 'push')
+        uses: mathieudutour/github-tag-action@v6.2
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          default_bump: ${{ inputs.default_bump }}
+          tag_prefix: ${{ inputs.tag_prefix }}
+
+      - name: Create Official GitHub Release with Attached Build Artifacts
+        if: (github.event_name == 'workflow_dispatch' || ((github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/') || startsWith(github.ref, 'refs/heads/hotfix/')) && github.event_name == 'push')) && steps.tag_version.outputs.new_tag != ''
+        uses: ncipollo/release-action@v1
+        with:
+          tag: ${{ steps.tag_version.outputs.new_tag }}
+          name: Release ${{ steps.tag_version.outputs.new_tag }}
+          body: ${{ steps.tag_version.outputs.changelog }}
+          artifacts: ${{ inputs.release_artifacts }}
+          token: ${{ secrets.GITHUB_TOKEN }}

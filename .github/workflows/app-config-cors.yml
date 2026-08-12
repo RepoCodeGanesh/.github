@@ -1,0 +1,58 @@
+# ==============================================================================
+# Reusable Called Workflow: Application CORS Configuration
+# Fetches SWA default hostname and configures Function App CORS origins
+# Fully Parameterized for Upcoming Applications & Customizations
+# ==============================================================================
+
+name: Reusable App CORS Config
+
+on:
+  workflow_call:
+    inputs:
+      static_web_app_name:
+        required: true
+        type: string
+      function_app_name:
+        required: true
+        type: string
+      resource_group:
+        required: true
+        type: string
+      app_subscription_id:
+        required: true
+        type: string
+    secrets:
+      APP_CLIENT_ID:
+        required: true
+      AZURE_TENANT_ID:
+        required: true
+
+jobs:
+  cors:
+    name: Configure CORS Origins
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Azure Login (OIDC) — Apps-prod
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.APP_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ inputs.app_subscription_id }}
+
+      - name: Set CORS Allowed Origins on Function App
+        run: |
+          SWA_HOST=$(az staticwebapp show \
+            --name "${{ inputs.static_web_app_name }}" \
+            --resource-group "${{ inputs.resource_group }}" \
+            --query "defaultHostname" -o tsv 2>/dev/null || echo "")
+          echo "SWA Hostname: https://${SWA_HOST}"
+          if [ -n "$SWA_HOST" ]; then
+            az functionapp cors add \
+              --name "${{ inputs.function_app_name }}" \
+              --resource-group "${{ inputs.resource_group }}" \
+              --allowed-origins "https://${SWA_HOST}" "*"
+            echo "✅ CORS configured successfully."
+          fi
