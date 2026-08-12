@@ -21,6 +21,9 @@ on:
       app_subscription_id:
         required: true
         type: string
+      environment_name:
+        type: string
+        default: 'tax-advisor-prod'
     secrets:
       APP_CLIENT_ID:
         required: true
@@ -31,6 +34,8 @@ jobs:
   cors:
     name: Configure CORS Origins
     runs-on: ubuntu-latest
+    environment: ${{ inputs.environment_name }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v5
