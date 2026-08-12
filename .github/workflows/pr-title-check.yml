@@ -1,0 +1,47 @@
+# ==============================================================================
+# Reusable Called Workflow: PR Title Conventional Commits Validation
+# Standardizes governance across all org repositories & ensures accurate SemVer bumps
+# Fully Parameterized for Upcoming Applications & Customizations
+# ==============================================================================
+
+name: Reusable PR Title Check
+
+on:
+  workflow_call:
+    inputs:
+      require_scope:
+        type: boolean
+        default: false
+      subject_pattern:
+        type: string
+        default: '.*'
+        description: 'Optional regex pattern to validate PR subject'
+
+jobs:
+  validate-pr-title:
+    name: Validate PR Title (Conventional Commits)
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+      statuses: write
+
+    steps:
+      - name: Validate PR Title Syntax (Conventional Commits)
+        uses: amannn/action-semantic-pull-request@v5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          types: |
+            feat
+            fix
+            docs
+            style
+            refactor
+            perf
+            test
+            build
+            ci
+            chore
+            revert
+          requireScope: ${{ inputs.require_scope }}
+          subjectPattern: ${{ inputs.subject_pattern }}
