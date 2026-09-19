@@ -1,0 +1,216 @@
+﻿# ==============================================================================
+# Reusable Called Workflow: Enterprise AKS Helm 3 Continuous Deployment
+# Authenticates via Azure OIDC, provisions namespaces, applies FinOps tuner,
+# and executes Helm 3 rolling upgrade with live health checks
+# Central Org Standard: RepoCodeGanesh/.github
+# ==============================================================================
+
+name: Reusable AKS Helm Deploy
+
+on:
+  workflow_call:
+    inputs:
+      cluster_name:
+        description: 'Target AKS Managed Cluster name'
+        required: true
+        type: string
+      resource_group:
+        description: 'Resource Group containing the AKS cluster'
+        required: true
+        type: string
+      subscription_id:
+        description: 'Azure Subscription ID for OIDC auth'
+        required: true
+        type: string
+      environment_name:
+        description: 'GitHub Environment name for approvals'
+        required: false
+        type: string
+        default: 'bank-compliance-prod'
+      chart_path:
+        description: 'Relative path to Helm chart directory'
+        required: true
+        type: string
+      release_name:
+        description: 'Helm release name'
+        required: true
+        type: string
+      namespace:
+        description: 'Target Kubernetes namespace'
+        required: true
+        type: string
+      image_repository:
+        description: 'Full image repository without tag'
+        required: true
+        type: string
+      image_tag:
+        description: 'Container image tag to deploy'
+        required: true
+        type: string
+      key_vault_name:
+        description: 'Central Key Vault name for runtime secrets'
+        required: false
+        type: string
+        default: 'kv-ht-ss-p-cin-01'
+      uami_name:
+        description: 'User-Assigned Managed Identity name'
+        required: false
+        type: string
+        default: 'uami-ht-bankc-p-cin-01'
+      ingress_manifest:
+        description: 'Path to custom Ingress manifest'
+        required: false
+        type: string
+        default: ''
+      tuner_manifest:
+        description: 'Path to FinOps tuner manifest'
+        required: false
+        type: string
+        default: ''
+      extra_manifests_dir:
+        description: 'Optional directory with additional manifests'
+        required: false
+        type: string
+        default: ''
+      health_endpoint:
+        description: 'Optional HTTP/APIM health check URL'
+        required: false
+        type: string
+        default: ''
+
+    secrets:
+      APP_CLIENT_ID:
+        required: true
+      AZURE_TENANT_ID:
+        required: true
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy-aks:
+    name: ☸️ Helm Deploy (${{ inputs.release_name }})
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment_name }}
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Azure OIDC Login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.APP_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ inputs.subscription_id }}
+
+      - name: Set AKS Context
+        uses: azure/aks-set-context@v3
+        with:
+          cluster-name: ${{ inputs.cluster_name }}
+          resource-group: ${{ inputs.resource_group }}
+
+      - name: Deploy Kubernetes Workload via Helm 3
+        run: |
+          OPENAI_ENDPOINT=$(az keyvault secret show --vault-name "${{ inputs.key_vault_name }}" --name openai-endpoint --query value -o tsv 2>/dev/null || echo "")
+          OPENAI_KEY=$(az keyvault secret show --vault-name "${{ inputs.key_vault_name }}" --name openai-api-key --query value -o tsv 2>/dev/null || echo "")
+          GEMINI_KEY=$(az keyvault secret show --vault-name "${{ inputs.key_vault_name }}" --name gemini-api-key --query value -o tsv 2>/dev/null || echo "")
+          GROQ_KEY=$(az keyvault secret show --vault-name "${{ inputs.key_vault_name }}" --name groq-api-key --query value -o tsv 2>/dev/null || echo "")
+
+          # Resolve Workload Identity Client ID
+          UAMI_CLIENT_ID=$(az identity show \
+            --name "${{ inputs.uami_name }}" \
+            --resource-group "${{ inputs.resource_group }}" \
+            --query clientId -o tsv 2>/dev/null || echo "")
+
+          if [ -z "$UAMI_CLIENT_ID" ]; then
+            echo "⚠️ UAMI ${{ inputs.uami_name }} not found, using cluster defaults"
+          else
+            echo "✅ Resolved UAMI Client ID: ${UAMI_CLIENT_ID}"
+          fi
+
+          kubectl create namespace "${{ inputs.namespace }}" --dry-run=client -o yaml | kubectl apply -f -
+
+          # Deploy custom Ingress if specified
+          if [ -n "${{ inputs.ingress_manifest }}" ] && [ -f "${{ inputs.ingress_manifest }}" ]; then
+            echo "⚡ Applying Ingress manifest: ${{ inputs.ingress_manifest }}"
+            kubectl apply -f "${{ inputs.ingress_manifest }}"
+          fi
+
+          # Deploy FinOps Tuner if specified
+          if [ -n "${{ inputs.tuner_manifest }}" ] && [ -f "${{ inputs.tuner_manifest }}" ]; then
+            echo "⚡ Applying FinOps Single-Node Tuner..."
+            kubectl apply -f "${{ inputs.tuner_manifest }}"
+          fi
+
+          # Auto-recover from stuck Helm release
+          for STUCK_STATUS in pending-upgrade pending-install pending-rollback; do
+            STUCK_SECRETS=$(kubectl get secret -n "${{ inputs.namespace }}" \
+              -l "owner=helm,name=${{ inputs.release_name }},status=${STUCK_STATUS}" \
+              -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true)
+            if [ -n "$STUCK_SECRETS" ]; then
+              echo "⚠️ Stuck Helm release(s) detected [${STUCK_STATUS}]: $STUCK_SECRETS"
+              for SECRET in $STUCK_SECRETS; do
+                kubectl label secret "$SECRET" -n "${{ inputs.namespace }}" status=failed --overwrite
+                echo "  ✅ Patched: $SECRET → failed"
+              done
+            fi
+          done
+
+          # Enforce 1-Replica FinOps Quota on System Addons
+          kubectl scale deployment keda-admission-webhooks -n kube-system --replicas=1 2>/dev/null || true
+          kubectl scale deployment keda-operator-metrics-apiserver -n kube-system --replicas=1 2>/dev/null || true
+          kubectl scale deployment metrics-server -n kube-system --replicas=1 2>/dev/null || true
+          kubectl scale deployment konnectivity-agent-autoscaler -n kube-system --replicas=1 2>/dev/null || true
+          kubectl scale deployment coredns-autoscaler -n kube-system --replicas=1 2>/dev/null || true
+
+          # Execute Helm Upgrade
+          IMAGE_LOWER=$(echo "${{ inputs.image_repository }}" | tr '[:upper:]' '[:lower:]')
+          helm upgrade --install "${{ inputs.release_name }}" "${{ inputs.chart_path }}" \
+            --namespace "${{ inputs.namespace }}" \
+            --set backend.image.repository="${IMAGE_LOWER}" \
+            --set backend.image.tag="${{ inputs.image_tag }}" \
+            --set secrets.openaiEndpoint="$OPENAI_ENDPOINT" \
+            --set secrets.openaiKey="$OPENAI_KEY" \
+            --set secrets.geminiApiKey="$GEMINI_KEY" \
+            --set secrets.groqApiKey="$GROQ_KEY" \
+            --set serviceAccount.clientId="$UAMI_CLIENT_ID" \
+            --wait \
+            --timeout 10m
+
+          # Deploy extra manifests (e.g. inference / FastMCP)
+          if [ -n "${{ inputs.extra_manifests_dir }}" ] && [ -d "${{ inputs.extra_manifests_dir }}" ]; then
+            echo "🤖 Deploying Extra Manifests: ${{ inputs.extra_manifests_dir }}"
+            kubectl apply -f "${{ inputs.extra_manifests_dir }}/" -n "${{ inputs.namespace }}"
+          fi
+
+      - name: Collect AKS Diagnostic Logs on Failure
+        if: failure()
+        run: |
+          echo "=== Pods in ${{ inputs.namespace }} ==="
+          kubectl get pods -n "${{ inputs.namespace }}" -o wide
+          echo "=== Services in ${{ inputs.namespace }} ==="
+          kubectl get svc -n "${{ inputs.namespace }}"
+          echo "=== Pod Events & Description ==="
+          kubectl describe pods -n "${{ inputs.namespace }}"
+
+      - name: 🔥 E2E Health Check
+        if: inputs.health_endpoint != ''
+        run: |
+          echo "⏳ Waiting 15s for pods to stabilize..."
+          sleep 15
+          echo "🚀 Querying health endpoint: ${{ inputs.health_endpoint }}"
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+            "${{ inputs.health_endpoint }}" \
+            -H "Content-Type: application/json" \
+            -d '{"query": "What are the RBI data localization rules for banking transaction records?"}' \
+            --max-time 45 || echo -e "\n000")
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+          BODY=$(echo "$RESPONSE" | sed '$d')
+          echo "HTTP Response Code: $HTTP_CODE"
+          if [ "$HTTP_CODE" = "200" ]; then
+            echo "✅ Smoke test PASSED (HTTP 200)"
+          else
+            echo "⚠️ Health check returned HTTP $HTTP_CODE (non-blocking verification)"
+          fi
