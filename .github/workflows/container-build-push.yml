@@ -1,4 +1,4 @@
-﻿# ==============================================================================
+# ==============================================================================
 # Reusable Called Workflow: Universal Container Build, Security Scan & Push
 # Builds multi-stage Docker images, scans with Trivy, and pushes to GHCR
 # Central Org Standard: RepoCodeGanesh/.github
@@ -52,7 +52,7 @@ permissions:
 
 jobs:
   build-and-push:
-    name: 🐳 Docker Build & Trivy Scan (${{ inputs.image_name }})
+    name: ?? Docker Build & Trivy Scan (${{ inputs.image_name }})
     runs-on: ubuntu-latest
     outputs:
       image_tag: ${{ steps.prep_tag.outputs.image_tag }}
@@ -75,7 +75,11 @@ jobs:
       - name: Downcase Image Name & Compute Tags
         id: prep_tag
         run: |
-          IMAGE_LOWER=$(echo "${{ inputs.registry }}/${{ inputs.image_name }}" | tr '[:upper:]' '[:lower:]')
+          RAW_NAME="${{ inputs.image_name }}"
+          if [[ "$RAW_NAME" != *"/"* ]]; then
+            RAW_NAME="${{ github.repository_owner }}/$RAW_NAME"
+          fi
+          IMAGE_LOWER=$(echo "${{ inputs.registry }}/${RAW_NAME}" | tr '[:upper:]' '[:lower:]')
           echo "image_tag=${IMAGE_LOWER}:latest" >> $GITHUB_OUTPUT
           echo "image_sha_tag=${IMAGE_LOWER}:${{ inputs.sha }}" >> $GITHUB_OUTPUT
 
@@ -90,7 +94,7 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: 🔒 Trivy Container Security Scan
+      - name: ?? Trivy Container Security Scan
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: '${{ steps.prep_tag.outputs.image_sha_tag }}'
