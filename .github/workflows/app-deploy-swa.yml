@@ -86,3 +86,4 @@ jobs:
           action: upload
           app_location: ${{ inputs.working_directory }}
           output_location: ${{ inputs.output_location }}
+          skip_app_build: true
