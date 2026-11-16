@@ -1,7 +1,7 @@
 # ==============================================================================
 # Reusable Called Workflow: Enterprise Terraform Landing Zone Golden Path Pipeline
 # Central Org Standard: RepoCodeGanesh/.github
-# Consolidates: Checkov IaC SAST -> Terraform Plan -> Environment-Gated Apply
+# Consolidates: Checkov IaC SAST -> Terraform Plan -> Environment-Gated Apply -> Governance Summary
 # ==============================================================================
 
 name: Reusable Terraform Golden Path
@@ -89,3 +89,38 @@ jobs:
     secrets:
       CLIENT_ID: ${{ secrets.CLIENT_ID }}
       AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+
+  # ── 4. Infrastructure Release Governance Summary ───────────────────────────
+  summary:
+    name: 📊 Infrastructure Release Summary
+    needs: [checkov-scan, plan, apply]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate Governance Summary
+        run: |
+          CHECKOV_RES="${{ needs.checkov-scan.result == 'success' && '🟡 ADVISORY (Discovery Mode)' || (needs.checkov-scan.result == 'failure' && '🔴 FAILED' || '⚪ SKIPPED') }}"
+          PLAN_RES="${{ needs.plan.result == 'success' && '🟢 SUCCESS' || (needs.plan.result == 'failure' && '🔴 FAILED' || '⚪ SKIPPED') }}"
+          APPLY_RES="${{ needs.apply.result == 'success' && '🟢 APPLIED' || (needs.apply.result == 'failure' && '🔴 FAILED' || '⚪ SKIPPED (PR / Gated Mode)') }}"
+          OVERALL="🟢 INFRASTRUCTURE READY"
+          if [ "${{ needs.plan.result }}" = "failure" ] || [ "${{ needs.apply.result }}" = "failure" ]; then
+            OVERALL="🔴 PIPELINE FAILED"
+          fi
+
+          cat << EOF >> $GITHUB_STEP_SUMMARY
+          # 🏛️ Terraform Landing Zone Golden Path Summary
+
+          > **Overall Outcome:** \`${OVERALL}\`
+          > **Working Directory:** \`${{ inputs.working_directory }}\`
+          > **Target Subscription:** \`${{ inputs.subscription_id }}\`
+          > **Environment:** \`${{ inputs.environment_name }}\`
+
+          ---
+
+          ### 📋 Pipeline Execution Matrix
+          | Stage | Result |
+          |---|:---:|
+          | **1. DevSecOps Checkov IaC Scan** | ${CHECKOV_RES} |
+          | **2. Terraform Plan** | ${PLAN_RES} |
+          | **3. Terraform Apply** | ${APPLY_RES} |
+          EOF
