@@ -30,6 +30,9 @@ on:
       output_location:
         type: string
         default: 'dist'
+      environment_name:
+        type: string
+        default: 'tax-advisor-prod'
     secrets:
       SHARED_CLIENT_ID:
         required: true
@@ -44,7 +47,7 @@ jobs:
   deploy-frontend:
     name: Build & Deploy React Frontend
     runs-on: ubuntu-latest
-    environment: tax-advisor-prod
+    environment: ${{ inputs.environment_name || 'tax-advisor-prod' }}
 
     steps:
       - name: Checkout
