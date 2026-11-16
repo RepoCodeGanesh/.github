@@ -1,0 +1,153 @@
+# ==============================================================================
+# Reusable Called Workflow: Enterprise Serverless AI Workload Golden Path Pipeline
+# Central Org Standard: RepoCodeGanesh/.github
+# For Serverless AI Workloads (e.g. TaxBot India, RAG assistants):
+# DevSecOps -> Function App Deploy -> Static Web App Deploy -> RAG Docs Sync ->
+# CORS & Gateway Binding -> Enterprise SemVer Release
+# ==============================================================================
+
+name: Reusable Serverless AI Workload Golden Path
+
+on:
+  workflow_call:
+    inputs:
+      app_name:
+        description: 'Application Name (e.g. tax-advisor)'
+        required: true
+        type: string
+      working_directory:
+        description: 'Workload directory (e.g. app/tax-advisor)'
+        required: true
+        type: string
+      function_app_name:
+        description: 'Target Azure Function App name'
+        required: true
+        type: string
+      static_web_app_name:
+        description: 'Target Azure Static Web App name'
+        required: true
+        type: string
+      resource_group:
+        description: 'Target Resource Group name'
+        required: true
+        type: string
+      app_subscription_id:
+        description: 'Application Azure Subscription ID'
+        required: true
+        type: string
+      storage_account_name:
+        description: 'Storage Account name for RAG documents'
+        required: true
+        type: string
+      storage_container_name:
+        description: 'Container name for RAG documents'
+        required: false
+        type: string
+        default: 'documents'
+      documents_directory:
+        description: 'Relative path to RAG documents'
+        required: false
+        type: string
+        default: 'app/tax-advisor/documents'
+      key_vault_name:
+        description: 'Key Vault name holding SWA deployment token'
+        required: false
+        type: string
+        default: 'kv-ht-ss-p-cin-01'
+      shared_subscription_id:
+        description: 'Shared Services Subscription ID'
+        required: false
+        type: string
+        default: '859a785c-bd38-402d-b595-1f44f40fb9bf'
+      swa_token_secret_name:
+        description: 'Key Vault secret name holding SWA deployment token'
+        required: false
+        type: string
+        default: 'taxb-swa-deployment-token'
+      environment_name:
+        description: 'Target GitHub environment name'
+        required: false
+        type: string
+        default: 'tax-advisor-prod'
+
+permissions:
+  id-token: write
+  contents: write
+  packages: write
+  security-events: write
+  actions: read
+
+jobs:
+  # ── 1. DevSecOps SAST & SCA Security Scanning ───────────────────────────────
+  devsecops-scan:
+    name: DevSecOps SAST & SCA Scan
+    uses: RepoCodeGanesh/.github/.github/workflows/app-sec-scan.yml@main
+    with:
+      working_directory: ${{ inputs.working_directory }}
+      key_vault_name: ${{ inputs.key_vault_name }}
+      shared_subscription_id: ${{ inputs.shared_subscription_id }}
+    secrets: inherit
+
+  # ── 2. Deploy Python Backend Function App (Serverless Compute) ─────────────
+  deploy-backend:
+    name: Deploy Python Function App Backend
+    needs: [devsecops-scan]
+    uses: RepoCodeGanesh/.github/.github/workflows/app-deploy-func.yml@main
+    with:
+      function_app_name: ${{ inputs.function_app_name }}
+      working_directory: '${{ inputs.working_directory }}/backend'
+      app_subscription_id: ${{ inputs.app_subscription_id }}
+      environment_name: ${{ inputs.environment_name }}
+    secrets: inherit
+
+  # ── 3. Build & Deploy React Frontend SPA to Azure SWA ──────────────────────
+  deploy-frontend:
+    name: Build & Deploy React Frontend
+    needs: [devsecops-scan]
+    uses: RepoCodeGanesh/.github/.github/workflows/app-deploy-swa.yml@main
+    with:
+      static_web_app_name: ${{ inputs.static_web_app_name }}
+      working_directory: '${{ inputs.working_directory }}/frontend'
+      key_vault_name: ${{ inputs.key_vault_name }}
+      shared_subscription_id: ${{ inputs.shared_subscription_id }}
+      swa_token_secret_name: ${{ inputs.swa_token_secret_name }}
+      environment_name: ${{ inputs.environment_name }}
+    secrets: inherit
+
+  # ── 4. Upload RAG Documents to Blob Storage ─────────────────────────────────
+  upload-documents:
+    name: Upload RAG Documents
+    needs: [devsecops-scan]
+    uses: RepoCodeGanesh/.github/.github/workflows/app-sync-docs.yml@main
+    with:
+      storage_account_name: ${{ inputs.storage_account_name }}
+      container_name: ${{ inputs.storage_container_name }}
+      source_directory: ${{ inputs.documents_directory }}
+      app_subscription_id: ${{ inputs.app_subscription_id }}
+    secrets: inherit
+
+  # ── 5. Configure CORS & API Gateway Allowed Origins ─────────────────────────
+  configure-cors:
+    name: Configure CORS & APIM
+    needs: [deploy-backend, deploy-frontend]
+    uses: RepoCodeGanesh/.github/.github/workflows/app-config-cors.yml@main
+    with:
+      static_web_app_name: ${{ inputs.static_web_app_name }}
+      function_app_name: ${{ inputs.function_app_name }}
+      resource_group: ${{ inputs.resource_group }}
+      app_subscription_id: ${{ inputs.app_subscription_id }}
+      environment_name: ${{ inputs.environment_name }}
+    secrets: inherit
+
+  # ── 6. Enterprise SemVer Release Tagging ─────────────────────────────────────
+  create-release:
+    name: Enterprise SemVer Release
+    needs: [configure-cors, upload-documents]
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      ((github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/')) && github.event_name == 'push')
+    uses: RepoCodeGanesh/.github/.github/workflows/app-tag-semver.yml@main
+    with:
+      artifact_name: '${{ inputs.app_name }}-backend-package'
+      release_artifacts: 'functionapp.zip'
+      tag_prefix: '${{ inputs.app_name }}-v'
