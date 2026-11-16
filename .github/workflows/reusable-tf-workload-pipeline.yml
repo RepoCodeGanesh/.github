@@ -1,0 +1,91 @@
+# ==============================================================================
+# Reusable Called Workflow: Enterprise Terraform Landing Zone Golden Path Pipeline
+# Central Org Standard: RepoCodeGanesh/.github
+# Consolidates: Checkov IaC SAST -> Terraform Plan -> Environment-Gated Apply
+# ==============================================================================
+
+name: Reusable Terraform Golden Path
+
+on:
+  workflow_call:
+    inputs:
+      working_directory:
+        description: 'Relative path to Terraform root module'
+        required: true
+        type: string
+      subscription_id:
+        description: 'Target Azure Subscription ID for OIDC auth'
+        required: true
+        type: string
+      environment_name:
+        description: 'GitHub Environment name for approvals and OIDC scoping'
+        required: true
+        type: string
+      artifact_name:
+        description: 'Name for the exported tfplan artifact'
+        required: true
+        type: string
+      tf_version:
+        description: 'Terraform binary version'
+        required: false
+        type: string
+        default: '1.15.8'
+      soft_fail:
+        description: 'Whether Checkov scan soft-fails on policy violations'
+        required: false
+        type: boolean
+        default: true
+    secrets:
+      CLIENT_ID:
+        required: true
+      AZURE_TENANT_ID:
+        required: true
+
+permissions:
+  id-token: write
+  contents: read
+  security-events: write
+  actions: read
+
+jobs:
+  # ── 1. DevSecOps IaC Security & Policy Gate (Checkov) ───────────────────────
+  checkov-scan:
+    name: DevSecOps IaC Scan
+    uses: RepoCodeGanesh/.github/.github/workflows/tf-checkov-scan.yml@main
+    with:
+      working_directory: ${{ inputs.working_directory }}
+      framework: 'terraform'
+      soft_fail: ${{ inputs.soft_fail }}
+
+  # ── 2. Terraform Plan ───────────────────────────────────────────────────────
+  plan:
+    name: Plan
+    needs: [checkov-scan]
+    uses: RepoCodeGanesh/.github/.github/workflows/tf-plan.yml@main
+    with:
+      working_directory: ${{ inputs.working_directory }}
+      subscription_id: ${{ inputs.subscription_id }}
+      environment_name: ${{ inputs.environment_name }}
+      artifact_name: ${{ inputs.artifact_name }}
+      tf_version: ${{ inputs.tf_version }}
+    secrets:
+      CLIENT_ID: ${{ secrets.CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+
+  # ── 3. Terraform Apply (Production Approval Gate) ───────────────────────────
+  apply:
+    name: Apply
+    needs: [plan]
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      ((github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop' || startsWith(github.ref, 'refs/heads/release/') || startsWith(github.ref, 'refs/tags/release/') || startsWith(github.ref, 'refs/tags/v')) && github.event_name == 'push')
+    uses: RepoCodeGanesh/.github/.github/workflows/tf-apply.yml@main
+    with:
+      working_directory: ${{ inputs.working_directory }}
+      subscription_id: ${{ inputs.subscription_id }}
+      environment_name: ${{ inputs.environment_name }}
+      artifact_name: ${{ inputs.artifact_name }}
+      tf_version: ${{ inputs.tf_version }}
+    secrets:
+      CLIENT_ID: ${{ secrets.CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
