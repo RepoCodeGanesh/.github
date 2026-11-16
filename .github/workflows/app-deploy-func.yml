@@ -24,6 +24,9 @@ on:
       health_endpoint:
         type: string
         default: '/api/health'
+      environment_name:
+        type: string
+        default: 'tax-advisor-prod'
     secrets:
       APP_CLIENT_ID:
         required: true
@@ -37,7 +40,7 @@ jobs:
   deploy-backend:
     name: Deploy Python Function App Backend
     runs-on: ubuntu-latest
-    environment: tax-advisor-prod
+    environment: ${{ inputs.environment_name }}
 
     steps:
       - name: Checkout
