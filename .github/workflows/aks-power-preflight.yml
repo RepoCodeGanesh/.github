@@ -1,0 +1,91 @@
+# ==============================================================================
+# Reusable Called Workflow: AKS Cluster Power-State Preflight & Auto-Wake
+# Checks if an AKS cluster is stopped for FinOps and wakes it up before deployment
+# Central Org Standard: RepoCodeGanesh/.github
+# ==============================================================================
+
+name: Reusable AKS Power Preflight
+
+on:
+  workflow_call:
+    inputs:
+      cluster_name:
+        description: 'Target AKS cluster name'
+        required: true
+        type: string
+      resource_group:
+        description: 'Target Resource Group name'
+        required: true
+        type: string
+      subscription_id:
+        description: 'Azure Subscription ID for OIDC auth'
+        required: true
+        type: string
+      environment_name:
+        description: 'Target environment name for OIDC auth approvals'
+        required: false
+        type: string
+        default: 'bank-compliance-prod'
+    secrets:
+      APP_CLIENT_ID:
+        required: true
+      AZURE_TENANT_ID:
+        required: true
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  ensure-running:
+    name: ☁️ Ensure AKS Is Running for Deployment
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment_name }}
+
+    steps:
+      - name: Azure Login (OIDC) — Subscription ${{ inputs.subscription_id }}
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.APP_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ inputs.subscription_id }}
+
+      - name: Check Power State & Auto-Wake If Stopped
+        shell: bash
+        run: |
+          echo "► Checking power state of AKS cluster ${{ inputs.cluster_name }}..."
+          POWER_STATE=$(az aks show \
+            --name "${{ inputs.cluster_name }}" \
+            --resource-group "${{ inputs.resource_group }}" \
+            --query "powerState.code" -o tsv 2>/dev/null || echo "Unknown")
+
+          echo "► Current AKS power state: ${POWER_STATE}"
+
+          if [ "${POWER_STATE}" = "Stopped" ]; then
+            echo "⚡ AKS is stopped (FinOps overnight tier). Initiating cluster start..."
+            az aks start \
+              --name "${{ inputs.cluster_name }}" \
+              --resource-group "${{ inputs.resource_group }}" \
+              --no-wait
+            echo "► Waiting for AKS to reach Running state (max 10m)..."
+            for i in $(seq 1 30); do
+              STATE=$(az aks show \
+                --name "${{ inputs.cluster_name }}" \
+                --resource-group "${{ inputs.resource_group }}" \
+                --query "powerState.code" -o tsv 2>/dev/null || echo "Unknown")
+              PROV_STATE=$(az aks show \
+                --name "${{ inputs.cluster_name }}" \
+                --resource-group "${{ inputs.resource_group }}" \
+                --query "provisioningState" -o tsv 2>/dev/null || echo "Unknown")
+              echo "  [Attempt ${i}/30] Power: ${STATE}, Provisioning: ${PROV_STATE}"
+              if [ "${STATE}" = "Running" ] && [ "${PROV_STATE}" = "Succeeded" ]; then
+                echo "✅ AKS is now Running and ready for deployments"
+                break
+              fi
+              sleep 20
+            done
+          elif [ "${POWER_STATE}" = "Running" ]; then
+            echo "✅ AKS is already Running. No power action needed."
+          else
+            echo "⚠️ AKS power state is '${POWER_STATE}'. Continuing..."
+          fi

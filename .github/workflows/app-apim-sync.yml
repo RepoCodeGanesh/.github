@@ -1,0 +1,77 @@
+# ==============================================================================
+# Reusable Called Workflow: APIM Zero-Drift OpenAPI Route Synchronization
+# Imports latest OpenAPI JSON schema into Azure API Management Gateway
+# Central Org Standard: RepoCodeGanesh/.github
+# ==============================================================================
+
+name: Reusable APIM Route Sync
+
+on:
+  workflow_call:
+    inputs:
+      shared_subscription_id:
+        description: 'Shared-services Subscription ID containing APIM'
+        required: true
+        type: string
+      resource_group:
+        description: 'Resource Group containing APIM'
+        required: true
+        type: string
+      service_name:
+        description: 'Azure API Management service name'
+        required: true
+        type: string
+      api_id:
+        description: 'Target API identifier in APIM'
+        required: true
+        type: string
+      api_path:
+        description: 'API base path suffix in APIM (e.g. bankc or tax)'
+        required: true
+        type: string
+      specification_url:
+        description: 'Public or internal URL to OpenAPI JSON schema'
+        required: true
+        type: string
+      environment_name:
+        description: 'Environment name for OIDC auth'
+        required: false
+        type: string
+        default: 'shared-services-prod'
+    secrets:
+      SHARED_CLIENT_ID:
+        required: true
+      AZURE_TENANT_ID:
+        required: true
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  apim-sync:
+    name: 🌐 APIM Resilience & Zero-Drift Route Sync
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment_name }}
+
+    steps:
+      - name: Azure Login (Shared Services APIM)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.SHARED_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ inputs.shared_subscription_id }}
+
+      - name: Auto-Sync OpenAPI Endpoints to Azure APIM (Zero-Drift)
+        shell: bash
+        run: |
+          echo "► Importing latest live OpenAPI schema into Azure APIM (${{ inputs.service_name }})..."
+          az apim api import \
+            --subscription "${{ inputs.shared_subscription_id }}" \
+            --resource-group "${{ inputs.resource_group }}" \
+            --service-name "${{ inputs.service_name }}" \
+            --api-id "${{ inputs.api_id }}" \
+            --path "${{ inputs.api_path }}" \
+            --specification-url "${{ inputs.specification_url }}" \
+            --specification-format OpenApiJson
+          echo "✅ All microservice routes dynamically synchronized into Azure APIM"
