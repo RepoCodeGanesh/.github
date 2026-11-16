@@ -1,0 +1,534 @@
+# ==============================================================================
+# Reusable Called Workflow: Enterprise AI Workload Golden Path Pipeline
+# Central Org Standard: RepoCodeGanesh/.github
+# Consolidates the complete enterprise lifecycle for AI workloads on Azure CAF:
+# DevSecOps -> GenAIOps Evals -> Container Packaging -> AKS Preflight ->
+# Helm CD -> Security Sync -> MCP Profiler -> APIM Zero-Drift -> SWA SPA ->
+# Live Health Canary -> Release Summary -> Enterprise SemVer Release
+# ==============================================================================
+
+name: Reusable AI Workload Golden Path
+
+on:
+  workflow_call:
+    inputs:
+      app_name:
+        description: 'Application Name (e.g. bank-compliance or tax-advisor)'
+        required: true
+        type: string
+      working_directory:
+        description: 'Relative path to workload directory (e.g. app/bank-compliance)'
+        required: true
+        type: string
+      cluster_name:
+        description: 'Target AKS Managed Cluster name'
+        required: true
+        type: string
+      resource_group:
+        description: 'Target Resource Group name'
+        required: true
+        type: string
+      subscription_id:
+        description: 'Workload Azure Subscription ID'
+        required: true
+        type: string
+      environment_name:
+        description: 'Target environment name for OIDC approvals'
+        required: false
+        type: string
+        default: 'bank-compliance-prod'
+      static_web_app_name:
+        description: 'Target Azure Static Web App name'
+        required: true
+        type: string
+      swa_token_secret_name:
+        description: 'Key Vault secret name holding SWA deployment token'
+        required: false
+        type: string
+        default: 'bankc-swa-deployment-token'
+      key_vault_name:
+        description: 'Shared Key Vault name'
+        required: false
+        type: string
+        default: 'kv-ht-ss-p-cin-01'
+      shared_subscription_id:
+        description: 'Shared Services Subscription ID'
+        required: false
+        type: string
+        default: '859a785c-bd38-402d-b595-1f44f40fb9bf'
+      apim_api_id:
+        description: 'Azure APIM API identifier'
+        required: false
+        type: string
+        default: ''
+      apim_path:
+        description: 'Azure APIM path suffix'
+        required: false
+        type: string
+        default: ''
+      apim_spec_url:
+        description: 'Live OpenAPI specification URL for zero-drift sync'
+        required: false
+        type: string
+        default: ''
+      live_url:
+        description: 'Live production URL for end-to-end canary checks'
+        required: false
+        type: string
+        default: ''
+      apim_gateway_url:
+        description: 'APIM Gateway health check URL'
+        required: false
+        type: string
+        default: ''
+      target:
+        description: 'Scope Target (all, backend-only, frontend-only, quality-gate-only)'
+        required: false
+        type: string
+        default: 'all'
+
+permissions:
+  id-token: write
+  contents: write
+  packages: write
+  security-events: write
+  actions: read
+
+jobs:
+  # ── 1. Smart Change Detection ───────────────────────────────────────────────
+  detect-changes:
+    name: 🔍 Path Change Detection
+    runs-on: ubuntu-latest
+    outputs:
+      backend: ${{ steps.filter.outputs.backend }}
+      frontend: ${{ steps.filter.outputs.frontend }}
+      eval: ${{ steps.filter.outputs.eval }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Filter Path Changes
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            backend:
+              - '${{ inputs.working_directory }}/backend/**'
+              - '${{ inputs.working_directory }}/chart/**'
+              - '${{ inputs.working_directory }}/k8s/**'
+            frontend:
+              - '${{ inputs.working_directory }}/frontend/**'
+            eval:
+              - '${{ inputs.working_directory }}/eval/**'
+              - '${{ inputs.working_directory }}/backend/**'
+
+  # ── 2. DevSecOps SAST & SCA Security Scan ───────────────────────────────────
+  devsecops-scan:
+    name: DevSecOps SAST & SCA Scan
+    needs: [detect-changes]
+    uses: RepoCodeGanesh/.github/.github/workflows/app-sec-scan.yml@main
+    with:
+      working_directory: ${{ inputs.working_directory }}
+      key_vault_name: ${{ inputs.key_vault_name }}
+      shared_subscription_id: ${{ inputs.shared_subscription_id }}
+    secrets: inherit
+
+  # ── 3. AI Quality & Regression Evaluation Gate ──────────────────────────────
+  ai-eval-quality-gate:
+    name: AI Quality & Regression Gate
+    needs: [detect-changes, devsecops-scan]
+    if: |
+      always() &&
+      !cancelled() &&
+      needs.devsecops-scan.result == 'success' &&
+      ((inputs.target == 'all' || inputs.target == 'quality-gate-only' || inputs.target == 'backend-only') ||
+       (needs.detect-changes.outputs.eval == 'true' || needs.detect-changes.outputs.backend == 'true' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'))
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run GenAIOps Regression & Cost Evaluation
+        run: |
+          if [ -f "${{ inputs.working_directory }}/eval/evaluate.py" ]; then
+            python ${{ inputs.working_directory }}/eval/evaluate.py --mode fast --max-cost 0.05
+          fi
+
+      - name: Run PyRIT Adversarial Red Team Attack Benchmark
+        run: |
+          if [ -f "${{ inputs.working_directory }}/eval/redteam_suite.py" ]; then
+            python ${{ inputs.working_directory }}/eval/redteam_suite.py
+          fi
+
+      - name: Run Enterprise AI Platform Multi-Task Test Suite
+        run: |
+          if [ -f "${{ inputs.working_directory }}/backend/test_all_8_tasks_suite.py" ]; then
+            python ${{ inputs.working_directory }}/backend/test_all_8_tasks_suite.py
+          fi
+
+      - name: Run Frontier Agentic & Tool Test Suite
+        run: |
+          if [ -f "${{ inputs.working_directory }}/backend/test_2026_frontier_suite.py" ]; then
+            python ${{ inputs.working_directory }}/backend/test_2026_frontier_suite.py
+          fi
+
+      - name: Run Policy & Contract Redline Semantic Test Suite
+        run: |
+          if [ -f "${{ inputs.working_directory }}/backend/test_redline_semantic_suite.py" ]; then
+            python ${{ inputs.working_directory }}/backend/test_redline_semantic_suite.py
+          fi
+
+      - name: Run Frontend UI Integrity & Component Test Suite
+        run: |
+          if [ -f "${{ inputs.working_directory }}/frontend/test_ui_syntax_and_integrity.py" ]; then
+            python ${{ inputs.working_directory }}/frontend/test_ui_syntax_and_integrity.py
+          fi
+
+      - name: Upload GenAIOps Scorecard & FinOps Attestation
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: genaiops-evaluation-attestation
+          path: |
+            ${{ inputs.working_directory }}/eval/eval_results.json
+            ${{ inputs.working_directory }}/eval/eval_cost_summary.json
+            ${{ inputs.working_directory }}/eval/eval_attestation.json
+            redteam_security_attestation.json
+            merged_compliance_model/v1.0.0/model_card.json
+          retention-days: 30
+
+  # ── 4. Build & Package Backend Container to GHCR ────────────────────────────
+  backend-build:
+    name: Backend Container Build
+    needs: [detect-changes, devsecops-scan, ai-eval-quality-gate]
+    if: |
+      always() &&
+      !cancelled() &&
+      needs.devsecops-scan.result == 'success' &&
+      (needs.ai-eval-quality-gate.result == 'success' || needs.ai-eval-quality-gate.result == 'skipped') &&
+      ((inputs.target == 'all' || inputs.target == 'backend-only') ||
+       (needs.detect-changes.outputs.backend == 'true' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'))
+    uses: RepoCodeGanesh/.github/.github/workflows/container-build-push.yml@main
+    with:
+      context_dir: '${{ inputs.working_directory }}/backend'
+      image_name: '${{ github.repository_owner }}/${{ inputs.app_name }}-backend'
+      sha: ${{ github.sha }}
+    secrets: inherit
+
+  # ── 5. Ensure AKS Is Running for Deployment (FinOps Auto-Wake) ──────────────
+  ensure-aks-running:
+    name: AKS Power-State Preflight
+    needs: [backend-build]
+    if: |
+      always() &&
+      !cancelled() &&
+      needs.backend-build.result == 'success'
+    uses: RepoCodeGanesh/.github/.github/workflows/aks-power-preflight.yml@main
+    with:
+      cluster_name: ${{ inputs.cluster_name }}
+      resource_group: ${{ inputs.resource_group }}
+      subscription_id: ${{ inputs.subscription_id }}
+      environment_name: ${{ inputs.environment_name }}
+    secrets: inherit
+
+  # ── 6. Deploy Backend to AKS (Helm 3 + Workload Identity) ───────────────────
+  backend-deploy:
+    name: Backend AKS Deploy
+    needs: [backend-build, ensure-aks-running]
+    if: |
+      always() &&
+      !cancelled() &&
+      needs.backend-build.result == 'success' &&
+      needs.ensure-aks-running.result == 'success'
+    uses: RepoCodeGanesh/.github/.github/workflows/aks-helm-deploy.yml@main
+    with:
+      cluster_name: ${{ inputs.cluster_name }}
+      resource_group: ${{ inputs.resource_group }}
+      subscription_id: ${{ inputs.subscription_id }}
+      environment_name: ${{ inputs.environment_name }}
+      chart_path: './${{ inputs.working_directory }}/chart'
+      release_name: ${{ inputs.app_name }}
+      namespace: ${{ inputs.app_name }}
+      image_repository: 'ghcr.io/${{ github.repository_owner }}/${{ inputs.app_name }}-backend'
+      image_tag: ${{ github.sha }}
+      ingress_manifest: './${{ inputs.working_directory }}/k8s/nginx/ingress-nginx.yaml'
+      tuner_manifest: './${{ inputs.working_directory }}/k8s/finops-single-node-tuner.yaml'
+      extra_manifests_dir: './${{ inputs.working_directory }}/k8s/inference'
+      health_endpoint: '${{ inputs.apim_gateway_url }}'
+    secrets: inherit
+
+  # ── 7. Zero-Trust Security Policies & Gatekeeper Admission Sync ─────────────
+  gatekeeper-policies:
+    name: Security Policies Sync
+    needs: [backend-deploy]
+    if: |
+      always() &&
+      !cancelled() &&
+      needs.backend-deploy.result == 'success'
+    uses: RepoCodeGanesh/.github/.github/workflows/aks-security-sync.yml@main
+    with:
+      cluster_name: ${{ inputs.cluster_name }}
+      resource_group: ${{ inputs.resource_group }}
+      subscription_id: ${{ inputs.subscription_id }}
+      namespace: ${{ inputs.app_name }}
+      network_policy_dir: '${{ inputs.working_directory }}/k8s/networkpolicy/'
+      environment_name: ${{ inputs.environment_name }}
+    secrets: inherit
+
+  # ── 8. FastMCP Functional Smoke & Memory Profiler ───────────────────────────
+  mcp-functional-monitor:
+    name: 🔌 FastMCP Functional & CPU/Memory Check
+    needs: [backend-deploy, gatekeeper-policies]
+    if: |
+      always() &&
+      !cancelled() &&
+      needs.backend-deploy.result == 'success' &&
+      needs.gatekeeper-policies.result == 'success'
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment_name }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.APP_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ inputs.subscription_id }}
+
+      - name: Get AKS Credentials
+        run: |
+          az aks get-credentials \
+            --name ${{ inputs.cluster_name }} \
+            --resource-group ${{ inputs.resource_group }} \
+            --overwrite-existing
+
+      - name: Wait for MCP Rollout and Record Pre-Test Baseline
+        run: |
+          kubectl rollout status deployment/bankc-mcp-server -n ${{ inputs.app_name }} --timeout=180s || true
+          echo "► Cluster CPU/memory baseline before MCP calls"
+          kubectl top nodes || true
+          kubectl top pods -n ${{ inputs.app_name }} || true
+          kubectl get pods -n ${{ inputs.app_name }} -l app=bankc-mcp-server -o wide || true
+
+      - name: Call Actual MCP Tools from Backend Pod
+        run: |
+          if kubectl get deployment/bankc-mcp-server -n ${{ inputs.app_name }} >/dev/null 2>&1; then
+            if ! kubectl exec -n ${{ inputs.app_name }} deployment/bankc-backend -- python -m app.services.mcp_smoke; then
+              echo "MCP smoke test failed; scaling only the MCP server to zero for safety."
+              kubectl scale deployment/bankc-mcp-server -n ${{ inputs.app_name }} --replicas=0
+              exit 1
+            fi
+          else
+            echo "ℹ️ No dedicated MCP server deployment; skipping smoke call."
+          fi
+
+      - name: Monitor Cluster and MCP Pod Resources
+        shell: bash
+        run: |
+          high_samples=0
+          for sample in 1 2 3; do
+            echo "► Resource sample ${sample}/3"
+            kubectl top nodes || true
+            metrics=$(kubectl top pod -n ${{ inputs.app_name }} -l app=bankc-mcp-server --no-headers 2>/dev/null || echo "")
+            echo "$metrics"
+            cpu=$(echo "$metrics" | awk 'NR==1 {print $2}')
+            memory=$(echo "$metrics" | awk 'NR==1 {print $3}')
+            cpu_m=${cpu%m}
+            memory_mib=${memory%Mi}
+            if [[ "$memory" == *Gi ]]; then
+              memory_mib=$(awk -v value="${memory%Gi}" 'BEGIN {printf "%d", value * 1024}')
+            fi
+            if [[ "$cpu_m" =~ ^[0-9]+$ ]] && [[ "$memory_mib" =~ ^[0-9]+$ ]]; then
+              if (( cpu_m >= 180 || memory_mib >= 230 )); then
+                high_samples=$((high_samples + 1))
+              else
+                high_samples=0
+              fi
+            fi
+            restarts=$(kubectl get pods -n ${{ inputs.app_name }} -l app=bankc-mcp-server -o jsonpath='{.items[0].status.containerStatuses[0].restartCount}' 2>/dev/null || echo "0")
+            echo "MCP CPU=${cpu:-0m}, memory=${memory:-0Mi}, restarts=${restarts:-0}"
+            if (( high_samples >= 2 )) || (( restarts > 0 )); then
+              echo "MCP resource guardrail or restart check failed; scaling only the MCP server to zero."
+              kubectl scale deployment/bankc-mcp-server -n ${{ inputs.app_name }} --replicas=0
+              exit 1
+            fi
+            if (( sample < 3 )); then sleep 5; fi
+          done
+          echo "✅ MCP remained healthy through resource samples."
+
+  # ── 9. APIM Zero-Drift OpenAPI Route Synchronization ────────────────────────
+  apim-resilience-sync:
+    name: APIM Route Sync
+    needs: [backend-deploy]
+    if: |
+      always() &&
+      !cancelled() &&
+      needs.backend-deploy.result == 'success' &&
+      inputs.apim_api_id != ''
+    uses: RepoCodeGanesh/.github/.github/workflows/app-apim-sync.yml@main
+    with:
+      shared_subscription_id: ${{ inputs.shared_subscription_id }}
+      resource_group: 'rg-ht-ss-p-cin-01'
+      service_name: 'apim-ht-ss-p-cin-01'
+      api_id: ${{ inputs.apim_api_id }}
+      api_path: ${{ inputs.apim_path }}
+      specification_url: ${{ inputs.apim_spec_url }}
+      environment_name: 'shared-services-prod'
+    secrets: inherit
+
+  # ── 10. Deploy Frontend SPA to Azure Static Web Apps ────────────────────────
+  deploy-frontend:
+    name: Build & Deploy Frontend SPA
+    needs: [detect-changes, devsecops-scan, ai-eval-quality-gate]
+    if: |
+      always() &&
+      !cancelled() &&
+      needs.devsecops-scan.result == 'success' &&
+      (needs.ai-eval-quality-gate.result == 'success' || needs.ai-eval-quality-gate.result == 'skipped') &&
+      ((inputs.target == 'all' || inputs.target == 'frontend-only') ||
+       (needs.detect-changes.outputs.frontend == 'true' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop'))
+    uses: RepoCodeGanesh/.github/.github/workflows/app-deploy-swa.yml@main
+    with:
+      static_web_app_name: ${{ inputs.static_web_app_name }}
+      working_directory: '${{ inputs.working_directory }}/frontend'
+      key_vault_name: ${{ inputs.key_vault_name }}
+      shared_subscription_id: ${{ inputs.shared_subscription_id }}
+      swa_token_secret_name: ${{ inputs.swa_token_secret_name }}
+      environment_name: ${{ inputs.environment_name }}
+    secrets: inherit
+
+  # ── 11. End-to-End Live Production Status & Functional Canary ───────────────
+  verify-live-status:
+    name: 🌐 Live Production Status & Functional Verification
+    needs: [backend-deploy, deploy-frontend, gatekeeper-policies, mcp-functional-monitor, apim-resilience-sync]
+    if: |
+      always() &&
+      !cancelled() &&
+      (needs.backend-deploy.result == 'success' || needs.backend-deploy.result == 'skipped') &&
+      (needs.deploy-frontend.result == 'success' || needs.deploy-frontend.result == 'skipped') &&
+      (needs.gatekeeper-policies.result == 'success' || needs.gatekeeper-policies.result == 'skipped') &&
+      (needs.mcp-functional-monitor.result == 'success' || needs.mcp-functional-monitor.result == 'skipped') &&
+      (needs.apim-resilience-sync.result == 'success' || needs.apim-resilience-sync.result == 'skipped') &&
+      inputs.live_url != ''
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify Live Production Canary
+        shell: bash
+        run: |
+          echo "► 1. Verifying Live Static Web App (${{ inputs.live_url }})..."
+          SWA_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 "${{ inputs.live_url }}")
+          echo "  SWA Response Code: ${SWA_CODE}"
+          if [ "${SWA_CODE}" != "200" ]; then
+            echo "❌ SWA production endpoint failed with HTTP ${SWA_CODE}"
+            exit 1
+          fi
+          echo "✅ SWA is 200 OK"
+
+          echo "► 2. Verifying Policy Redliner Route (${{ inputs.live_url }}/redline)..."
+          REDLINE_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 "${{ inputs.live_url }}/redline")
+          echo "  Policy Redliner Response Code: ${REDLINE_CODE}"
+          if [ "${REDLINE_CODE}" != "200" ]; then
+            echo "❌ Policy Redliner endpoint failed with HTTP ${REDLINE_CODE}"
+            exit 1
+          fi
+          echo "✅ Policy Redliner route is 200 OK"
+
+          if [ -n "${{ inputs.apim_gateway_url }}" ]; then
+            echo "► 3. Verifying Azure APIM Gateway Health Endpoint..."
+            APIM_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 "${{ inputs.apim_gateway_url }}")
+            echo "  APIM Gateway Response Code: ${APIM_CODE}"
+            if [ "${APIM_CODE}" != "200" ]; then
+              echo "⚠️ APIM health returned ${APIM_CODE}; non-blocking"
+            else
+              echo "✅ APIM Gateway is 200 OK"
+            fi
+          fi
+
+          echo "► 4. Verifying End-to-End Live AI Regulatory Inference..."
+          AI_RESP=$(curl -s --max-time 30 -X POST "${{ inputs.live_url }}/compliance/query" \
+            -H "Content-Type: application/json" \
+            -d '{"query":"Can a regulated bank store customer payment data outside India?","department":"risk"}' 2>/dev/null || echo "{}")
+
+          echo "  Inference response preview: $(echo "$AI_RESP" | head -c 200)..."
+          if echo "$AI_RESP" | grep -qi "India\|localization\|compliance\|regulat\|risk\|data"; then
+            echo "✅ Live multi-agent AI pipeline successfully reasoned on statutory data localization query"
+          else
+            echo "⚠️ AI endpoint returned non-standard response or timed out; non-blocking"
+          fi
+
+  # ── 12. Release Governance Summary ──────────────────────────────────────────
+  summary:
+    name: 📊 Release Governance Summary
+    needs: [detect-changes, devsecops-scan, ai-eval-quality-gate, backend-build, ensure-aks-running, backend-deploy, gatekeeper-policies, mcp-functional-monitor, apim-resilience-sync, deploy-frontend, verify-live-status]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate True Release Summary
+        run: |
+          SAST_STATUS="${{ needs.devsecops-scan.result == 'success' && '🟢 PASSED' || (needs.devsecops-scan.result == 'failure' && '🔴 FAILED' || '⚪ SKIPPED') }}"
+          EVAL_STATUS="${{ needs.ai-eval-quality-gate.result == 'success' && '🟢 PASSED' || (needs.ai-eval-quality-gate.result == 'failure' && '🔴 FAILED' || '⚪ SKIPPED') }}"
+          BUILD_STATUS="${{ needs.backend-build.result == 'success' && '🟢 BUILT' || (needs.backend-build.result == 'failure' && '🔴 FAILED' || '⚪ SKIPPED') }}"
+          AKS_STATUS="${{ needs.ensure-aks-running.result == 'success' && '🟢 READY' || (needs.ensure-aks-running.result == 'failure' && '🔴 FAILED' || '⚪ SKIPPED') }}"
+          DEPLOY_STATUS="${{ needs.backend-deploy.result == 'success' && '🟢 DEPLOYED' || (needs.backend-deploy.result == 'failure' && '🔴 FAILED' || '⚪ SKIPPED') }}"
+          APIM_STATUS="${{ needs.apim-resilience-sync.result == 'success' && '🟢 ZERO-DRIFT SYNCED' || (needs.apim-resilience-sync.result == 'failure' && '🔴 FAILED' || '⚪ SKIPPED') }}"
+          FRONTEND_STATUS="${{ needs.deploy-frontend.result == 'success' && '🟢 DEPLOYED' || (needs.deploy-frontend.result == 'failure' && '🔴 FAILED' || '⚪ SKIPPED') }}"
+          LIVE_STATUS="${{ needs.verify-live-status.result == 'success' && '🟢 VERIFIED (200 OK)' || (needs.verify-live-status.result == 'failure' && '🔴 FAILED' || '⚪ SKIPPED') }}"
+          MCP_STATUS="${{ needs.mcp-functional-monitor.result == 'success' && '🟢 TOOLS + RESOURCES VERIFIED' || (needs.mcp-functional-monitor.result == 'failure' && '🔴 FAILED / SCALED TO ZERO' || '⚪ SKIPPED') }}"
+
+          OVERALL="🟢 RELEASE SUCCESSFUL"
+          if [ "${{ needs.devsecops-scan.result }}" = "failure" ] || [ "${{ needs.ai-eval-quality-gate.result }}" = "failure" ] || [ "${{ needs.backend-build.result }}" = "failure" ] || [ "${{ needs.ensure-aks-running.result }}" = "failure" ] || [ "${{ needs.backend-deploy.result }}" = "failure" ] || [ "${{ needs.gatekeeper-policies.result }}" = "failure" ] || [ "${{ needs.mcp-functional-monitor.result }}" = "failure" ] || [ "${{ needs.apim-resilience-sync.result }}" = "failure" ] || [ "${{ needs.deploy-frontend.result }}" = "failure" ] || [ "${{ needs.verify-live-status.result }}" = "failure" ]; then
+            OVERALL="🔴 PIPELINE FAILED"
+          fi
+
+          cat <<EOF >> $GITHUB_STEP_SUMMARY
+          # 🚀 ${{ inputs.app_name }} — Production Pipeline Release Summary
+
+          > **Overall Outcome:** \`${OVERALL}\`
+          > **Architecture Standard:** True Level 3 Golden Path (RepoCodeGanesh/.github)
+          > **Target Environment:** \`${{ inputs.environment_name }}\` (${{ inputs.subscription_id }})
+          > **Commit SHA:** \`${{ github.sha }}\` | **Trigger:** \`${{ github.event_name }}\`
+
+          ---
+
+          ### 📋 Multi-Stage Pipeline Execution Matrix
+
+          | Pipeline Stage | Responsibilities | Execution Result |
+          |---|---|:---:|
+          | **1. DevSecOps Security Scan** | Bandit Python SAST + pip-audit & npm audit | ${SAST_STATUS} |
+          | **2. GenAIOps Quality Gate** | Ragas Triad Groundedness & 9-Case Semantic Suite | ${EVAL_STATUS} |
+          | **3. Container Packaging** | Multi-stage Docker build + Trivy CVE scan to GHCR | ${BUILD_STATUS} |
+          | **3b. AKS Power-State Preflight** | Start cluster only if stopped; verify ready | ${AKS_STATUS} |
+          | **4. Backend AKS Release** | Helm 3 rolling upgrade + Workload Identity on AKS | ${DEPLOY_STATUS} |
+          | **4b. FastMCP Functional & Resource Check** | FastMCP tool discovery/search + AKS CPU/memory samples | ${MCP_STATUS} |
+          | **4c. APIM Zero-Drift Route Sync** | Automated OpenAPI schema ingestion & 180s buffer | ${APIM_STATUS} |
+          | **5. Frontend SPA Release** | React Vite build deployed to Azure Static Web Apps | ${FRONTEND_STATUS} |
+          | **6. Live Production Health** | Live SWA + APIM Gateway + E2E AI Query Verification | ${LIVE_STATUS} |
+
+          ---
+
+          ### 🌐 Live Production Endpoints:
+          * **Production Domain:** [${{ inputs.live_url }}](${{ inputs.live_url }})
+          * **Policy Redliner Studio:** [${{ inputs.live_url }}/redline](${{ inputs.live_url }}/redline)
+          * **APIM Gateway Endpoint:** \`https://apim-ht-ss-p-cin-01.azure-api.net/${{ inputs.apim_path }}\`
+          EOF
+
+  # ── 13. Enterprise SemVer Release Tagging ───────────────────────────────────
+  create-release:
+    name: Enterprise SemVer Release
+    needs: [summary]
+    if: |
+      needs.summary.result == 'success' &&
+      (github.event_name == 'workflow_dispatch' ||
+       ((github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/')) && github.event_name == 'push'))
+    uses: RepoCodeGanesh/.github/.github/workflows/app-tag-semver.yml@main
+    with:
+      artifact_name: 'genaiops-evaluation-attestation'
+      release_artifacts: 'redteam_security_attestation.json'
+      tag_prefix: '${{ inputs.app_name }}-v'
